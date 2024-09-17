@@ -1,9 +1,10 @@
 use {
-    borsh::BorshSerialize,
-    mpl_token_metadata::pda::{find_master_edition_account, find_metadata_account},
+    borsh::{BorshDeserialize, BorshSerialize},
     name_tokenizer::{
         entrypoint::process_instruction,
-        instruction::{create_collection, create_mint, create_nft, redeem_nft, withdraw_tokens},
+        instruction::{
+            create_collection, create_mint, create_nft, redeem_nft, unverify_nft, withdraw_tokens,
+        },
         state::{
             CentralState, NftRecord, COLLECTION_PREFIX, METADATA_SIGNER, MINT_PREFIX,
             ROOT_DOMAIN_ACCOUNT,
@@ -23,6 +24,7 @@ use {
 
 pub mod common;
 
+use mpl_token_metadata::accounts::{MasterEdition, Metadata};
 use name_tokenizer::instruction::edit_data;
 
 use crate::common::utils::{mint_bootstrap, sign_send_instructions};
@@ -143,8 +145,8 @@ async fn test_offer() {
     ////
     // Create collection
     ////
-    let (edition_key, _) = find_master_edition_account(&collection_mint);
-    let (collection_metadata_key, _) = find_metadata_account(&collection_mint);
+    let (edition_key, _) = MasterEdition::find_pda(&collection_mint);
+    let (collection_metadata_key, _) = Metadata::find_pda(&collection_mint);
     let ix = create_collection(
         create_collection::Accounts {
             collection_mint: &collection_mint,
@@ -193,7 +195,7 @@ async fn test_offer() {
     let alice_nft_ata = get_associated_token_address(&alice.pubkey(), &nft_mint);
     let bob_nft_ata = get_associated_token_address(&bob.pubkey(), &nft_mint);
     let (nft_record, _) = NftRecord::find_key(&name_key, &name_tokenizer::ID);
-    let (metadata_key, _) = find_metadata_account(&nft_mint);
+    let (metadata_key, _) = Metadata::find_pda(&nft_mint);
 
     let ix = create_nft(
         create_nft::Accounts {
@@ -426,4 +428,46 @@ async fn test_offer() {
     sign_send_instructions(&mut prg_test_ctx, vec![ix], vec![&bob])
         .await
         .unwrap();
+
+    //////
+    // Unverify NFT
+    //////
+    let info = prg_test_ctx
+        .banks_client
+        .get_account(metadata_key)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let des = Metadata::safe_deserialize(&info.data).unwrap();
+    assert!(des.collection.unwrap().verified);
+
+    let ix = unverify_nft(
+        unverify_nft::Accounts {
+            metadata_account: &metadata_key,
+            edition_account: &edition_key,
+            collection_metadata: &collection_metadata_key,
+            collection_mint: &collection_mint,
+            central_state: &central_key,
+            fee_payer: &prg_test_ctx.payer.pubkey(),
+            metadata_program: &mpl_token_metadata::ID,
+            system_program: &system_program::ID,
+            rent_account: &sysvar::rent::ID,
+            #[cfg(not(feature = "devnet"))]
+            metadata_signer: &METADATA_SIGNER,
+        },
+        unverify_nft::Params {},
+    );
+    sign_send_instructions(&mut prg_test_ctx, vec![ix], vec![])
+        .await
+        .unwrap();
+    let info = prg_test_ctx
+        .banks_client
+        .get_account(metadata_key)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let des = Metadata::safe_deserialize(&info.data).unwrap();
+    assert!(!des.collection.unwrap().verified);
 }
